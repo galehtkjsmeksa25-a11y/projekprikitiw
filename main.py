@@ -139,6 +139,7 @@ from datetime import datetime
 FOLDER = os.path.dirname(os.path.abspath(__file__))
 FILE_JUAL = os.path.join(FOLDER, "penjualan.json")
 FILE_KELUAR = os.path.join(FOLDER, "stok_keluar.json")
+FILE_KAS = os.path.join(FOLDER, "kas.json")
 BATAS_MENIPIS = 5  # sama dengan batas "hampir habis" di tabel
 
 
@@ -163,8 +164,82 @@ def sekarang():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def rp_tanda(x):
+    return ("+" if x >= 0 else "-") + rp(abs(x))
+
+
 log = baca_log(FILE_JUAL)            # catatan penjualan
 log_keluar = baca_log(FILE_KELUAR)   # catatan stok keluar (rusak, kadaluarsa, dll)
+
+
+# ---------- UANG YANG DIMILIKI (KAS) ----------
+def baca_kas():
+    try:
+        with open(FILE_KAS, encoding="utf-8") as f:
+            d = json.load(f)
+        return {"saldo": int(d.get("saldo", 0)), "riwayat": d.get("riwayat", [])}
+    except FileNotFoundError:
+        return {"saldo": 0, "riwayat": []}
+    except Exception:
+        os.replace(FILE_KAS, FILE_KAS + ".rusak")
+        return {"saldo": 0, "riwayat": []}
+
+
+kas = baca_kas()
+
+
+def simpan_kas():
+    with open(FILE_KAS, "w", encoding="utf-8") as f:
+        json.dump(kas, f, indent=2, ensure_ascii=False)
+
+
+def perbarui_kas():
+    lbl_kas.config(text="Uang dimiliki: " + rp(kas["saldo"]))
+
+
+def ubah_kas(jumlah, ket):
+    # jumlah positif = uang masuk, negatif = uang keluar
+    kas["saldo"] += jumlah
+    kas["riwayat"].append({"waktu": sekarang(), "ket": ket, "jumlah": jumlah, "saldo": kas["saldo"]})
+    simpan_kas()
+    perbarui_kas()
+
+
+def cukup_uang(total):
+    if total > kas["saldo"]:
+        messagebox.showerror("Uang tidak cukup",
+                             "Uang dimiliki %s, butuh %s.\nPenambahan stok dibatalkan."
+                             % (rp(kas["saldo"]), rp(total)), parent=win)
+        return False
+    return True
+
+
+def tambah_kas():
+    n = simpledialog.askinteger("Tambah uang", "Jumlah uang yang ditambahkan (Rp):", minvalue=1, parent=win)
+    if n:
+        ubah_kas(n, "Tambah uang")
+
+
+def atur_kas():
+    s = simpledialog.askinteger("Atur saldo", "Uang yang dimiliki sekarang (Rp):", minvalue=0,
+                                initialvalue=kas["saldo"], parent=win)
+    if s is None:
+        return
+    if s != kas["saldo"]:
+        ubah_kas(s - kas["saldo"], "Atur saldo")
+
+
+def awal():
+    # dipanggil sekali saat program dibuka: tanya saldo awal (kalau belum pernah), lalu cek stok
+    if not os.path.exists(FILE_KAS):
+        s = simpledialog.askinteger("Uang dimiliki", "Masukkan uang yang kamu miliki saat ini (Rp):",
+                                    minvalue=0, parent=win)
+        if s is not None:
+            kas["saldo"] = s
+            kas["riwayat"].append({"waktu": sekarang(), "ket": "Saldo awal", "jumlah": s, "saldo": s})
+            simpan_kas()
+            perbarui_kas()
+    cek_awal()
 
 
 # ---------- NOTIFIKASI STOK MENIPIS / HABIS ----------
@@ -203,7 +278,6 @@ def tampil_peringatan():
 
 
 def cek_awal():
-    # dipanggil sekali saat program dibuka
     habis, dikit = daftar_stok_rendah()
     if habis or dikit:
         tampil_peringatan()
@@ -213,7 +287,7 @@ def cek_awal():
 lbl_notif = tk.Label(win, text="", fg="white", font=("Arial", 10, "bold"), pady=4, cursor="hand2")
 lbl_notif.bind("<Button-1>", lambda e: tampil_peringatan())
 
- 
+
 def perbarui_notif():
     habis, dikit = daftar_stok_rendah()
     if not habis and not dikit:
@@ -239,6 +313,16 @@ tk.Button(cari_frame, text="Reset", command=lambda: cari_var.set("")).pack(side=
 lbl_hasil = tk.Label(cari_frame, text="", bg="#e8e8e8", fg="#555555")
 lbl_hasil.pack(side="right")
 
+# panel uang yang dimiliki (di atas panel peringatan dan pencarian)
+kas_frame = tk.Frame(win, bg="#dfe8f1")
+kas_frame.pack(fill="x", padx=10, pady=(8, 0), before=cari_frame)
+lbl_kas = tk.Label(kas_frame, text="", bg="#dfe8f1", fg="#1e5631", font=("Arial", 11, "bold"))
+lbl_kas.pack(side="left", padx=8, pady=4)
+tk.Button(kas_frame, text="Atur Saldo", command=atur_kas).pack(side="right", padx=(0, 6))
+tk.Button(kas_frame, text="Tambah Uang", command=tambah_kas).pack(side="right", padx=6)
+
+tabel.config(height=6)   # tabel tetap melebar mengisi ruang; ini supaya tombol bawah tidak terpotong
+
 
 def saring():
     kata = cari_var.get().strip().lower()
@@ -251,7 +335,7 @@ def saring():
     lbl_hasil.config(text="%d barang ditemukan" % len(tabel.get_children()))
 
 
-# bungkus isi() yang asli: setelah tabel diisi, terapkan pencarian + perbarui notifikasi
+# bungkus isi() yang asli: setelah tabel diisi, terapkan pencarian + perbarui notifikasi & uang
 isi_asli = isi
 
 
@@ -259,13 +343,13 @@ def isi():
     isi_asli()
     saring()
     perbarui_notif()
+    perbarui_kas()
 
 
 cari_var.trace_add("write", lambda *a: isi())
 
 
-# ---------- PENJUALAN (dicatat) ----------
-# bungkus jual() yang asli supaya setiap penjualan ikut tercatat
+# ---------- PENJUALAN (dicatat, uang bertambah) ----------
 jual_asli = jual
 
 
@@ -282,7 +366,59 @@ def jual():
         log.append({"waktu": sekarang(), "barang": nama, "jumlah": n,
                     "harga": harga, "total": n * harga})
         tulis_log(FILE_JUAL, log)
+        ubah_kas(n * harga, "Jual %s x%d" % (nama, n))
         peringatan_stok(i)
+
+
+# ---------- STOK MASUK (uang berkurang) ----------
+masuk_asli = masuk
+
+
+def masuk():
+    p = tabel.selection()
+    if not p:
+        masuk_asli()
+        return
+    i = int(p[0])
+    nama, sebelum = data[i][0], data[i][2]
+    masuk_asli()
+    n = data[i][2] - sebelum
+    if n <= 0:
+        return
+    harga = simpledialog.askinteger("Harga beli", "Harga beli %s per satuan (Rp):" % nama,
+                                    minvalue=0, parent=win)
+    if harga is None or not cukup_uang(n * harga):
+        data[i][2] -= n   # batalkan stok yang barusan ditambahkan
+        tulis(data)
+        isi()
+        if harga is None:
+            messagebox.showinfo("Dibatalkan", "Harga beli tidak diisi, stok masuk dibatalkan.", parent=win)
+        return
+    ubah_kas(-n * harga, "Beli stok %s x%d @ %s" % (nama, n, rp(harga)))
+
+
+# ---------- BARANG BARU (stok awal juga memakai uang) ----------
+baru_asli = baru
+
+
+def baru():
+    jumlah_sebelum = len(data)
+    baru_asli()
+    if len(data) <= jumlah_sebelum:
+        return
+    b = data[-1]
+    if b[2] <= 0:
+        return   # tanpa stok awal, tidak ada biaya
+    harga = simpledialog.askinteger("Harga beli", "Harga beli %s per satuan (Rp):" % b[0],
+                                    minvalue=0, parent=win)
+    if harga is None or not cukup_uang(b[2] * harga):
+        data.pop()   # batalkan barang yang barusan ditambahkan
+        tulis(data)
+        isi()
+        if harga is None:
+            messagebox.showinfo("Dibatalkan", "Harga beli tidak diisi, barang baru dibatalkan.", parent=win)
+        return
+    ubah_kas(-b[2] * harga, "Beli stok awal %s x%d @ %s" % (b[0], b[2], rp(harga)))
 
 
 # ---------- STOK KELUAR ----------
@@ -333,7 +469,7 @@ def buat_tabel(induk, kolom):
 def hasil_penjualan():
     w = tk.Toplevel(win)
     w.title("Hasil Penjualan")
-    w.geometry("660x470")
+    w.geometry("680x470")
     w.configure(bg="#e8e8e8")
 
     atas_w = tk.Frame(w, bg="#e8e8e8")
@@ -348,10 +484,11 @@ def hasil_penjualan():
 
     nb = ttk.Notebook(w)
     nb.pack(fill="both", expand=True, padx=10, pady=8)
-    f1, f2, f3 = tk.Frame(nb), tk.Frame(nb), tk.Frame(nb)
+    f1, f2, f3, f4 = tk.Frame(nb), tk.Frame(nb), tk.Frame(nb), tk.Frame(nb)
     nb.add(f1, text="Per Barang")
     nb.add(f2, text="Riwayat Penjualan")
     nb.add(f3, text="Stok Keluar")
+    nb.add(f4, text="Riwayat Uang")
 
     t1 = buat_tabel(f1, [("nama", "Nama Barang", 240, "w"), ("jumlah", "Terjual", 100, "center"),
                          ("uang", "Pendapatan", 160, "center")])
@@ -360,13 +497,16 @@ def hasil_penjualan():
                          ("total", "Total", 100, "center")])
     t3 = buat_tabel(f3, [("waktu", "Waktu", 150, "center"), ("nama", "Barang", 180, "w"),
                          ("jumlah", "Jumlah", 70, "center"), ("alasan", "Alasan", 200, "w")])
+    t4 = buat_tabel(f4, [("waktu", "Waktu", 140, "center"), ("ket", "Keterangan", 250, "w"),
+                         ("jumlah", "Jumlah", 110, "center"), ("saldo", "Saldo", 110, "center")])
 
     def refresh(*_):
         hari = datetime.now().strftime("%Y-%m-%d")
         semua = periode.get() == "Semua"
         rows = [x for x in log if semua or x["waktu"].startswith(hari)]
         keluar = [x for x in log_keluar if semua or x["waktu"].startswith(hari)]
-        for tv in (t1, t2, t3):
+        uang = [x for x in kas["riwayat"] if semua or x["waktu"].startswith(hari)]
+        for tv in (t1, t2, t3, t4):
             tv.delete(*tv.get_children())
         per = {}
         for x in rows:
@@ -380,6 +520,8 @@ def hasil_penjualan():
                                          rp(x["harga"]), rp(x["total"])))
         for x in reversed(keluar):
             t3.insert("", "end", values=(x["waktu"], x["barang"], x["jumlah"], x["alasan"]))
+        for x in reversed(uang):
+            t4.insert("", "end", values=(x["waktu"], x["ket"], rp_tanda(x["jumlah"]), rp(x["saldo"])))
         ringkas.config(text="%d transaksi | %d item terjual | Omzet %s | %d item keluar"
                        % (len(rows), sum(x["jumlah"] for x in rows),
                           rp(sum(x["total"] for x in rows)), sum(x["jumlah"] for x in keluar)))
@@ -396,7 +538,7 @@ for teks, fn in [("Jual", jual), ("Stok Masuk", masuk), ("Barang Baru", baru), (
 tk.Button(bawah, text="Stok Keluar", command=stok_keluar, width=12, pady=4).pack(side="left", padx=(0, 6))  # TAMBAHAN
 tk.Button(bawah, text="Hasil Penjualan", command=hasil_penjualan, width=16, pady=4,
           bg="#2b4a6f", fg="white").pack(side="right")  # TAMBAHAN
-win.after(400, cek_awal)  # TAMBAHAN: popup peringatan saat program dibuka
+win.after(400, awal)  # TAMBAHAN: tanya saldo awal (sekali) + popup peringatan stok
 
 tabel.bind("<Double-1>", lambda e: jual())
 isi()
