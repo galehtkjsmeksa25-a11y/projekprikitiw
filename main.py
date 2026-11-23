@@ -140,6 +140,8 @@ FOLDER = os.path.dirname(os.path.abspath(__file__))
 FILE_JUAL = os.path.join(FOLDER, "penjualan.json")
 FILE_KELUAR = os.path.join(FOLDER, "stok_keluar.json")
 FILE_KAS = os.path.join(FOLDER, "kas.json")
+FILE_SATUAN = os.path.join(FOLDER, "satuan.json")
+FILE_SESI = os.path.join(FOLDER, "sesi.json")
 BATAS_MENIPIS = 5  # sama dengan batas "hampir habis" di tabel
 
 
@@ -170,6 +172,98 @@ def rp_tanda(x):
 
 log = baca_log(FILE_JUAL)            # catatan penjualan
 log_keluar = baca_log(FILE_KELUAR)   # catatan stok keluar (rusak, kadaluarsa, dll)
+
+
+# ---------- SATUAN PER BARANG (dus, karung, dll) ----------
+# disimpan di satuan.json (terpisah dari stok.json) supaya data stok aslimu tidak berubah:
+#   {"Indomie Goreng": {"s": "pcs", "u": "dus", "i": 40}}   artinya 1 dus = 40 pcs
+# stok tetap dihitung dalam satuan terkecil (pcs); dus hanya untuk memudahkan input dan tampilan
+def baca_satuan():
+    try:
+        with open(FILE_SATUAN, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        os.replace(FILE_SATUAN, FILE_SATUAN + ".rusak")
+        return {}
+
+
+satuan = baca_satuan()
+
+
+def tulis_satuan():
+    with open(FILE_SATUAN, "w", encoding="utf-8") as f:
+        json.dump(satuan, f, indent=2, ensure_ascii=False)
+
+
+def info_satuan(nama):
+    return satuan.get(nama) or {"s": "pcs", "u": "", "i": 0}
+
+
+def punya_dus(nama):
+    s = info_satuan(nama)
+    return bool(s["u"]) and s["i"] > 1
+
+
+def faktor(nama, unit):
+    # berapa satuan terkecil dalam 1 "unit" yang dipilih (dus = isi per dus, pcs = 1)
+    return info_satuan(nama)["i"] if punya_dus(nama) and unit == info_satuan(nama)["u"] else 1
+
+
+def fmt_stok(nama, x):
+    # 113 -> "2 dus 33 pcs" (kalau barang punya dus), selain itu "113 pcs"
+    s = info_satuan(nama)
+    if punya_dus(nama) and x >= s["i"]:
+        dus, sisa = divmod(x, s["i"])
+        return "%d %s" % (dus, s["u"]) + (" %d %s" % (sisa, s["s"]) if sisa else "")
+    return "%d %s" % (x, s["s"])
+
+
+def angka(teks):
+    try:
+        return int(str(teks).replace(".", "").replace(",", "").strip())
+    except ValueError:
+        return None
+
+
+def form(judul, kolom, tombol="OK"):
+    # dialog dengan beberapa isian. kolom = [(label, nilai_awal, daftar_pilihan_atau_None)]
+    # hasil: list isian (teks), atau None kalau dibatalkan
+    d = tk.Toplevel(win)
+    d.title(judul)
+    d.transient(win)
+    d.resizable(False, False)
+    d.configure(bg="#e8e8e8", padx=14, pady=10)
+    kotak = []
+    for label, awal, pilihan in kolom:
+        tk.Label(d, text=label, bg="#e8e8e8", anchor="w", justify="left").pack(fill="x", pady=(6, 0))
+        if pilihan:
+            w = ttk.Combobox(d, values=pilihan, state="readonly", width=38)
+            w.set(awal)
+        else:
+            w = tk.Entry(d, width=40)
+            w.insert(0, awal)
+        w.pack(fill="x")
+        kotak.append(w)
+    hasil = {"v": None}
+
+    def ok(*_):
+        hasil["v"] = [w.get() for w in kotak]
+        d.destroy()
+
+    bar = tk.Frame(d, bg="#e8e8e8")
+    bar.pack(fill="x", pady=(12, 0))
+    tk.Button(bar, text="Batal", width=10, command=d.destroy).pack(side="right")
+    tk.Button(bar, text=tombol, width=10, command=ok).pack(side="right", padx=6)
+    d.bind("<Return>", ok)
+    d.bind("<Escape>", lambda e: d.destroy())
+    kotak[0].focus_set()
+    d.wait_visibility()
+    d.grab_set()
+    win.wait_window(d)
+    return hasil["v"]
 
 
 # ---------- UANG YANG DIMILIKI (KAS) ----------
@@ -250,7 +344,7 @@ def daftar_stok_rendah():
         if s <= 0:
             habis.append(n)
         elif s <= BATAS_MENIPIS:
-            dikit.append("%s (sisa %d)" % (n, s))
+            dikit.append("%s (sisa %s)" % (n, fmt_stok(n, s)))
     return habis, dikit
 
 
@@ -261,7 +355,7 @@ def peringatan_stok(i):
     if s <= 0:
         messagebox.showwarning("Stok HABIS", "%s sudah HABIS!" % b[0], parent=win)
     elif s <= BATAS_MENIPIS:
-        messagebox.showwarning("Stok menipis", "%s hampir habis, sisa %d." % (b[0], s), parent=win)
+        messagebox.showwarning("Stok menipis", "%s hampir habis, sisa %s." % (b[0], fmt_stok(b[0], s)), parent=win)
 
 
 def tampil_peringatan():
@@ -336,12 +430,28 @@ def saring():
 
 
 # bungkus isi() yang asli: setelah tabel diisi, terapkan pencarian + perbarui notifikasi & uang
+def tampil_satuan():
+    # tampilkan stok dalam dus (mis. "2 dus 33 pcs") dan isi per dus di samping nama barang
+    for iid in tabel.get_children():
+        b = data[int(iid)]
+        s = info_satuan(b[0])
+        tabel.set(iid, "sisa", fmt_stok(b[0], b[2] - b[3]))
+        if punya_dus(b[0]):
+            tabel.set(iid, "nama", "%s  (1 %s = %d %s)" % (b[0], s["u"], s["i"], s["s"]))
+
+
+# lebarkan kolom supaya teks satuan muat
+for _k, _w in [("nama", 230), ("harga", 90), ("masuk", 60), ("terjual", 60), ("sisa", 130), ("ket", 100)]:
+    tabel.column(_k, width=_w)
+tabel.heading("harga", text="Harga/satuan")
+
 isi_asli = isi
 
 
 def isi():
     isi_asli()
     saring()
+    tampil_satuan()
     perbarui_notif()
     perbarui_kas()
 
@@ -353,21 +463,47 @@ cari_var.trace_add("write", lambda *a: isi())
 jual_asli = jual
 
 
+def catat_jual(i, n, ket):
+    nama, harga = data[i][0], data[i][1]
+    log.append({"waktu": sekarang(), "barang": nama, "jumlah": n,
+                "harga": harga, "total": n * harga})
+    tulis_log(FILE_JUAL, log)
+    ubah_kas(n * harga, "Jual %s %s" % (nama, ket))
+    peringatan_stok(i)
+
+
 def jual():
     p = tabel.selection()
     if not p:
         jual_asli()
         return
     i = int(p[0])
-    nama, harga, sebelum = data[i][0], data[i][1], data[i][3]
+    nama, sebelum = data[i][0], data[i][3]
+    if punya_dus(nama):
+        # barang punya satuan besar: pilih jumlah + satuan (pcs / dus)
+        s = info_satuan(nama)
+        stok = data[i][2] - data[i][3]
+        v = form("Jual", [("Berapa %s yang terjual? (sisa %s)" % (nama, fmt_stok(nama, stok)), "1", None),
+                          ("Satuan", s["s"], [s["s"], s["u"]])], "Jual")
+        if not v:
+            return
+        q = angka(v[0])
+        if not q or q < 1:
+            messagebox.showerror("Gagal", "Jumlah harus berupa angka lebih dari 0.", parent=win)
+            return
+        n = q * faktor(nama, v[1])
+        if n > stok:
+            messagebox.showerror("Gagal", "Stok tinggal %s." % fmt_stok(nama, stok), parent=win)
+            return
+        data[i][3] += n
+        tulis(data)
+        isi()
+        catat_jual(i, n, "x%d %s" % (q, v[1]))
+        return
     jual_asli()
     n = data[i][3] - sebelum
     if n > 0:
-        log.append({"waktu": sekarang(), "barang": nama, "jumlah": n,
-                    "harga": harga, "total": n * harga})
-        tulis_log(FILE_JUAL, log)
-        ubah_kas(n * harga, "Jual %s x%d" % (nama, n))
-        peringatan_stok(i)
+        catat_jual(i, n, "x%d" % n)
 
 
 # ---------- STOK MASUK (uang berkurang) ----------
@@ -381,11 +517,30 @@ def masuk():
         return
     i = int(p[0])
     nama, sebelum = data[i][0], data[i][2]
+    if punya_dus(nama):
+        # barang punya satuan besar: jumlah + satuan (dus dulu) + harga beli per satuan itu
+        s = info_satuan(nama)
+        v = form("Stok masuk", [("Berapa %s yang datang?" % nama, "1", None),
+                                ("Satuan", s["u"], [s["u"], s["s"]]),
+                                ("Harga beli per satuan di atas (Rp)", "", None)], "Tambah")
+        if not v:
+            return
+        q, harga = angka(v[0]), angka(v[2])
+        if not q or q < 1 or harga is None:
+            messagebox.showerror("Gagal", "Jumlah dan harga beli harus berupa angka.", parent=win)
+            return
+        if not cukup_uang(q * harga):
+            return
+        data[i][2] += q * faktor(nama, v[1])
+        tulis(data)
+        isi()
+        ubah_kas(-q * harga, "Beli stok %s x%d %s @ %s" % (nama, q, v[1], rp(harga)))
+        return
     masuk_asli()
     n = data[i][2] - sebelum
     if n <= 0:
         return
-    harga = simpledialog.askinteger("Harga beli", "Harga beli %s per satuan (Rp):" % nama,
+    harga = simpledialog.askinteger("Harga beli", "Harga beli %s per %s (Rp):" % (nama, info_satuan(nama)["s"]),
                                     minvalue=0, parent=win)
     if harga is None or not cukup_uang(n * harga):
         data[i][2] -= n   # batalkan stok yang barusan ditambahkan
@@ -407,18 +562,18 @@ def baru():
     if len(data) <= jumlah_sebelum:
         return
     b = data[-1]
-    if b[2] <= 0:
-        return   # tanpa stok awal, tidak ada biaya
-    harga = simpledialog.askinteger("Harga beli", "Harga beli %s per satuan (Rp):" % b[0],
-                                    minvalue=0, parent=win)
-    if harga is None or not cukup_uang(b[2] * harga):
-        data.pop()   # batalkan barang yang barusan ditambahkan
-        tulis(data)
-        isi()
-        if harga is None:
-            messagebox.showinfo("Dibatalkan", "Harga beli tidak diisi, barang baru dibatalkan.", parent=win)
-        return
-    ubah_kas(-b[2] * harga, "Beli stok awal %s x%d @ %s" % (b[0], b[2], rp(harga)))
+    if b[2] > 0:
+        harga = simpledialog.askinteger("Harga beli", "Harga beli %s per satuan terkecil (Rp):" % b[0],
+                                        minvalue=0, parent=win)
+        if harga is None or not cukup_uang(b[2] * harga):
+            data.pop()   # batalkan barang yang barusan ditambahkan
+            tulis(data)
+            isi()
+            if harga is None:
+                messagebox.showinfo("Dibatalkan", "Harga beli tidak diisi, barang baru dibatalkan.", parent=win)
+            return
+        ubah_kas(-b[2] * harga, "Beli stok awal %s x%d @ %s" % (b[0], b[2], rp(harga)))
+    atur_satuan_item(len(data) - 1)   # isi satuan (dus, dll); boleh dikosongkan / dibatalkan
 
 
 # ---------- STOK KELUAR ----------
@@ -431,12 +586,24 @@ def stok_keluar():
     if sisa <= 0:
         messagebox.showerror("Gagal", "Stok %s sudah habis." % b[0])
         return
-    n = simpledialog.askinteger("Stok keluar", "Berapa %s yang keluar? (sisa %d)" % (b[0], sisa),
-                                minvalue=1, parent=win)
-    if not n:
-        return
+    if punya_dus(b[0]):
+        s = info_satuan(b[0])
+        v = form("Stok keluar", [("Berapa %s yang keluar? (sisa %s)" % (b[0], fmt_stok(b[0], sisa)), "1", None),
+                                 ("Satuan", s["s"], [s["s"], s["u"]])], "Lanjut")
+        if not v:
+            return
+        q = angka(v[0])
+        if not q or q < 1:
+            messagebox.showerror("Gagal", "Jumlah harus berupa angka lebih dari 0.", parent=win)
+            return
+        n = q * faktor(b[0], v[1])
+    else:
+        n = simpledialog.askinteger("Stok keluar", "Berapa %s yang keluar? (sisa %d)" % (b[0], sisa),
+                                    minvalue=1, parent=win)
+        if not n:
+            return
     if n > sisa:
-        messagebox.showerror("Gagal", "Stok tinggal %d." % sisa)
+        messagebox.showerror("Gagal", "Stok tinggal %s." % fmt_stok(b[0], sisa))
         return
     alasan = simpledialog.askstring("Stok keluar", "Alasan (rusak, kadaluarsa, dipakai sendiri, dll):",
                                     initialvalue="Rusak", parent=win)
@@ -449,6 +616,176 @@ def stok_keluar():
     tulis_log(FILE_KELUAR, log_keluar)
     isi()
     peringatan_stok(i)
+
+
+# ---------- HAPUS (satuannya ikut dihapus) ----------
+hapus_asli = hapus
+
+
+def hapus():
+    p = tabel.selection()
+    nama = data[int(p[0])][0] if p else None
+    jumlah_sebelum = len(data)
+    hapus_asli()
+    if nama in satuan and len(data) < jumlah_sebelum:
+        del satuan[nama]
+        tulis_satuan()
+
+
+# ---------- ATUR SATUAN (dus, karung, dll) ----------
+def atur_satuan_item(i):
+    nama = data[i][0]
+    s = info_satuan(nama)
+    v = form("Atur satuan: " + nama, [
+        ("Satuan terkecil (pcs, botol, kg, dll)", s["s"], None),
+        ("Satuan besar, kosongkan jika tidak ada (dus, karung, dll)", s["u"], None),
+        ("Isi per satuan besar (jumlah satuan terkecil)", str(s["i"]) if s["i"] else "", None)], "Simpan")
+    if not v:
+        return
+    kecil, besar, banyak = v[0].strip() or "pcs", v[1].strip(), angka(v[2]) or 0
+    if besar and (banyak < 2 or besar.lower() == kecil.lower()):
+        messagebox.showerror("Gagal", "Satuan besar harus berbeda dari satuan terkecil dan isinya minimal 2.",
+                             parent=win)
+        return
+    satuan[nama] = {"s": kecil, "u": besar, "i": banyak if besar else 0}
+    tulis_satuan()
+    isi()
+
+
+def atur_satuan():
+    i = dipilih()
+    if i is not None:
+        atur_satuan_item(i)
+
+
+# ---------- MULAI JUALAN / SELESAI JUALAN ----------
+# sesi disimpan di sesi.json: {"aktif": {"mulai": ..., "kas_awal": ...} atau null, "riwayat": [ringkasan sesi]}
+def baca_sesi():
+    try:
+        with open(FILE_SESI, encoding="utf-8") as f:
+            d = json.load(f)
+        return {"aktif": d.get("aktif"), "riwayat": d.get("riwayat", [])}
+    except FileNotFoundError:
+        return {"aktif": None, "riwayat": []}
+    except Exception:
+        os.replace(FILE_SESI, FILE_SESI + ".rusak")
+        return {"aktif": None, "riwayat": []}
+
+
+sesi = baca_sesi()
+
+
+def simpan_sesi():
+    with open(FILE_SESI, "w", encoding="utf-8") as f:
+        json.dump(sesi, f, indent=2, ensure_ascii=False)
+
+
+def hitung_sesi(mulai, selesai=None):
+    # rekap penjualan, pembelian stok, dan stok keluar antara waktu mulai dan selesai
+    def dalam(w):
+        return w >= mulai and (selesai is None or w <= selesai)
+    jual_ = [x for x in log if dalam(x["waktu"])]
+    beli = -sum(x["jumlah"] for x in kas["riwayat"]
+                if dalam(x["waktu"]) and x["ket"].startswith("Beli stok"))
+    per = {}
+    for x in jual_:
+        per[x["barang"]] = per.get(x["barang"], 0) + x["jumlah"]
+    terlaris = max(per.items(), key=lambda kv: kv[1]) if per else None
+    return {"transaksi": len(jual_), "item": sum(x["jumlah"] for x in jual_),
+            "omzet": sum(x["total"] for x in jual_), "pembelian": beli,
+            "keluar": sum(x["jumlah"] for x in log_keluar if dalam(x["waktu"])),
+            "terlaris": terlaris}
+
+
+def lama_sesi(mulai, selesai):
+    d = datetime.strptime(selesai, "%Y-%m-%d %H:%M:%S") - datetime.strptime(mulai, "%Y-%m-%d %H:%M:%S")
+    menit = int(d.total_seconds() // 60)
+    return "%d jam %d menit" % (menit // 60, menit % 60) if menit >= 60 else "%d menit" % menit
+
+
+lbl_sesi = tk.Label(kas_frame, text="", bg="#dfe8f1", font=("Arial", 10, "bold"))
+lbl_sesi.pack(side="left", padx=14)
+btn_sesi = None   # tombol Mulai/Selesai, dibuat di bagian bawah
+
+
+def perbarui_sesi():
+    if sesi["aktif"]:
+        lbl_sesi.config(text="BUKA sejak " + sesi["aktif"]["mulai"][11:16], fg="#1e5631")
+        if btn_sesi:
+            btn_sesi.config(text="Selesai Jualan", bg="#c0392b", fg="white")
+    else:
+        lbl_sesi.config(text="TUTUP", fg="#c0392b")
+        if btn_sesi:
+            btn_sesi.config(text="Mulai Jualan", bg="#1e8449", fg="white")
+
+
+def mulai_jualan(tanya=True):
+    if sesi["aktif"]:
+        messagebox.showinfo("Jualan", "Jualan sudah dimulai sejak %s." % sesi["aktif"]["mulai"], parent=win)
+        return True
+    if tanya and not messagebox.askyesno(
+            "Mulai jualan", "Mulai jualan sekarang?\nUang awal: %s" % rp(kas["saldo"]), parent=win):
+        return False
+    sesi["aktif"] = {"mulai": sekarang(), "kas_awal": kas["saldo"]}
+    simpan_sesi()
+    perbarui_sesi()
+    return True
+
+
+def selesai_jualan():
+    a = sesi["aktif"]
+    if not a:
+        messagebox.showinfo("Jualan", "Belum mulai jualan.", parent=win)
+        return
+    if not messagebox.askyesno("Selesai jualan", "Akhiri jualan sekarang dan tutup rekap?", parent=win):
+        return
+    akhir = sekarang()
+    r = hitung_sesi(a["mulai"], akhir)
+    r.update({"mulai": a["mulai"], "selesai": akhir, "kas_awal": a["kas_awal"], "kas_akhir": kas["saldo"]})
+    sesi["riwayat"].append(r)
+    sesi["aktif"] = None
+    simpan_sesi()
+    perbarui_sesi()
+    teks = ("Jualan: %s s/d %s (%s)\n\nTransaksi: %d\nItem terjual: %d\nOmzet: %s\nPembelian stok: %s\n"
+            "Item keluar: %d\n\nUang awal: %s\nUang akhir: %s\nSelisih: %s"
+            % (a["mulai"][11:16], akhir[11:16], lama_sesi(a["mulai"], akhir), r["transaksi"], r["item"],
+               rp(r["omzet"]), rp(r["pembelian"]), r["keluar"], rp(r["kas_awal"]), rp(r["kas_akhir"]),
+               rp_tanda(r["kas_akhir"] - r["kas_awal"])))
+    if r["terlaris"]:
+        teks += "\n\nTerlaris: %s (%s)" % (r["terlaris"][0], fmt_stok(r["terlaris"][0], r["terlaris"][1]))
+    habis, dikit = daftar_stok_rendah()
+    if habis or dikit:
+        teks += "\n\nPerlu restok: %s" % ", ".join(habis + dikit)
+    messagebox.showinfo("Rekap jualan", teks, parent=win)
+
+
+def tombol_sesi():
+    if sesi["aktif"]:
+        selesai_jualan()
+    else:
+        mulai_jualan()
+
+
+# penjualan hanya boleh saat jualan sudah dimulai (kalau belum, ditawari untuk memulai)
+jual_tanpa_sesi = jual
+
+
+def jual():
+    if not sesi["aktif"]:
+        if not messagebox.askyesno("Belum mulai jualan",
+                                   "Jualan belum dimulai. Mulai jualan sekarang?", parent=win):
+            return
+        mulai_jualan(tanya=False)
+    jual_tanpa_sesi()
+
+
+# tambahkan perbarui_sesi() ke isi() supaya status buka/tutup selalu tampil
+isi_sebelum_sesi = isi
+
+
+def isi():
+    isi_sebelum_sesi()
+    perbarui_sesi()
 
 
 # ---------- LAPORAN ----------
@@ -484,11 +821,12 @@ def hasil_penjualan():
 
     nb = ttk.Notebook(w)
     nb.pack(fill="both", expand=True, padx=10, pady=8)
-    f1, f2, f3, f4 = tk.Frame(nb), tk.Frame(nb), tk.Frame(nb), tk.Frame(nb)
+    f1, f2, f3, f4, f5 = tk.Frame(nb), tk.Frame(nb), tk.Frame(nb), tk.Frame(nb), tk.Frame(nb)
     nb.add(f1, text="Per Barang")
     nb.add(f2, text="Riwayat Penjualan")
     nb.add(f3, text="Stok Keluar")
     nb.add(f4, text="Riwayat Uang")
+    nb.add(f5, text="Riwayat Sesi")
 
     t1 = buat_tabel(f1, [("nama", "Nama Barang", 240, "w"), ("jumlah", "Terjual", 100, "center"),
                          ("uang", "Pendapatan", 160, "center")])
@@ -499,6 +837,9 @@ def hasil_penjualan():
                          ("jumlah", "Jumlah", 70, "center"), ("alasan", "Alasan", 200, "w")])
     t4 = buat_tabel(f4, [("waktu", "Waktu", 140, "center"), ("ket", "Keterangan", 250, "w"),
                          ("jumlah", "Jumlah", 110, "center"), ("saldo", "Saldo", 110, "center")])
+    t5 = buat_tabel(f5, [("mulai", "Mulai", 130, "center"), ("selesai", "Selesai", 130, "center"),
+                         ("trx", "Transaksi", 70, "center"), ("omzet", "Omzet", 100, "center"),
+                         ("awal", "Uang awal", 100, "center"), ("akhir", "Uang akhir", 100, "center")])
 
     def refresh(*_):
         hari = datetime.now().strftime("%Y-%m-%d")
@@ -506,7 +847,7 @@ def hasil_penjualan():
         rows = [x for x in log if semua or x["waktu"].startswith(hari)]
         keluar = [x for x in log_keluar if semua or x["waktu"].startswith(hari)]
         uang = [x for x in kas["riwayat"] if semua or x["waktu"].startswith(hari)]
-        for tv in (t1, t2, t3, t4):
+        for tv in (t1, t2, t3, t4, t5):
             tv.delete(*tv.get_children())
         per = {}
         for x in rows:
@@ -514,14 +855,18 @@ def hasil_penjualan():
             p[0] += x["jumlah"]
             p[1] += x["total"]
         for nama, (j, u) in sorted(per.items(), key=lambda kv: -kv[1][1]):
-            t1.insert("", "end", values=(nama, j, rp(u)))
+            t1.insert("", "end", values=(nama, fmt_stok(nama, j), rp(u)))
         for x in reversed(rows):
             t2.insert("", "end", values=(x["waktu"], x["barang"], x["jumlah"],
                                          rp(x["harga"]), rp(x["total"])))
         for x in reversed(keluar):
-            t3.insert("", "end", values=(x["waktu"], x["barang"], x["jumlah"], x["alasan"]))
+            t3.insert("", "end", values=(x["waktu"], x["barang"], fmt_stok(x["barang"], x["jumlah"]), x["alasan"]))
         for x in reversed(uang):
             t4.insert("", "end", values=(x["waktu"], x["ket"], rp_tanda(x["jumlah"]), rp(x["saldo"])))
+        for x in reversed(sesi["riwayat"]):
+            if semua or x["mulai"].startswith(hari):
+                t5.insert("", "end", values=(x["mulai"][:16], x["selesai"][:16], x["transaksi"],
+                                             rp(x["omzet"]), rp(x["kas_awal"]), rp(x["kas_akhir"])))
         ringkas.config(text="%d transaksi | %d item terjual | Omzet %s | %d item keluar"
                        % (len(rows), sum(x["jumlah"] for x in rows),
                           rp(sum(x["total"] for x in rows)), sum(x["jumlah"] for x in keluar)))
@@ -536,8 +881,13 @@ bawah.pack(fill="x", padx=10, pady=(4, 10))
 for teks, fn in [("Jual", jual), ("Stok Masuk", masuk), ("Barang Baru", baru), ("Hapus", hapus)]:
     tk.Button(bawah, text=teks, command=fn, width=12, pady=4).pack(side="left", padx=(0, 6))
 tk.Button(bawah, text="Stok Keluar", command=stok_keluar, width=12, pady=4).pack(side="left", padx=(0, 6))  # TAMBAHAN
+tk.Button(bawah, text="Satuan", command=atur_satuan, width=12, pady=4).pack(side="left", padx=(0, 6))  # TAMBAHAN
+btn_sesi = tk.Button(bawah, text="Mulai Jualan", command=tombol_sesi, width=14, pady=4)  # TAMBAHAN
+btn_sesi.pack(side="left", padx=(0, 6))  # TAMBAHAN
+perbarui_sesi()  # TAMBAHAN
 tk.Button(bawah, text="Hasil Penjualan", command=hasil_penjualan, width=16, pady=4,
           bg="#2b4a6f", fg="white").pack(side="right")  # TAMBAHAN
+win.geometry("1000x480")  # TAMBAHAN: jendela dilebarkan karena tombol bertambah
 win.after(400, awal)  # TAMBAHAN: tanya saldo awal (sekali) + popup peringatan stok
 
 tabel.bind("<Double-1>", lambda e: jual())
